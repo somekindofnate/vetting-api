@@ -1,0 +1,87 @@
+openapi: "3.0.0"
+info:
+  title: Vetting API
+  version: 1.0.0
+paths:
+  /v1/vetting:
+    post:
+      summary: Submit a vetting job
+      operationId: SubmitVettingJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VettingRequest'
+      responses:
+        '202':
+          description: Job accepted and queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VettingResponse'
+        '400':
+          description: Invalid request payload
+
+components:
+  schemas:
+    Address:
+      type: object
+      required:
+        - street_1
+        - city
+        - state
+        - postal_code
+        - country
+      properties:
+        street_1:
+          type: string
+        street_2:
+          type: string
+        city:
+          type: string
+        state:
+          type: string
+        postal_code:
+          type: string
+        country:
+          type: string
+
+    VettingRequest:
+      type: object
+      required:
+        - email
+        - ip_address
+      properties:
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+        ip_address:
+          type: string
+        user_agent:
+          type: string
+        billing_address:
+          $ref: '#/components/schemas/Address'
+        mailing_address:
+          $ref: '#/components/schemas/Address'
+        metadata:
+          type: object
+          additionalProperties: true
+        webhook_url:
+          type: string
+          format: uri
+
+    VettingResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        check_status_url:
+          type: string
