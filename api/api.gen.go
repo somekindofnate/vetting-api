@@ -8,6 +8,7 @@ import (
 	"compress/flate"
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"net/url"
 	"path"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/labstack/echo/v4"
+	"github.com/oapi-codegen/runtime"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
@@ -48,14 +50,35 @@ type VettingResponse struct {
 	Status         *string    `json:"status,omitempty"`
 }
 
+// VettingResult defines model for VettingResult.
+type VettingResult struct {
+	Enrichment     *map[string]interface{} `json:"enrichment,omitempty"`
+	JobId          *string                 `json:"job_id,omitempty"`
+	Recommendation *string                 `json:"recommendation,omitempty"`
+	RiskScore      *int                    `json:"risk_score,omitempty"`
+	Status         *string                 `json:"status,omitempty"`
+}
+
+// SubmitBatchVettingJobsJSONBody defines parameters for SubmitBatchVettingJobs.
+type SubmitBatchVettingJobsJSONBody = []VettingRequest
+
 // SubmitVettingJobJSONRequestBody defines body for SubmitVettingJob for application/json ContentType.
 type SubmitVettingJobJSONRequestBody = VettingRequest
+
+// SubmitBatchVettingJobsJSONRequestBody defines body for SubmitBatchVettingJobs for application/json ContentType.
+type SubmitBatchVettingJobsJSONRequestBody = SubmitBatchVettingJobsJSONBody
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
 	// Submit a vetting job
 	// (POST /v1/vetting)
 	SubmitVettingJob(ctx echo.Context) error
+	// Submit a batch of vetting jobs
+	// (POST /v1/vetting/batch)
+	SubmitBatchVettingJobs(ctx echo.Context) error
+	// Check the status and results of a vetting job
+	// (GET /v1/vetting/{job_id})
+	GetVettingJob(ctx echo.Context, jobId string) error
 }
 
 // ServerInterfaceWrapper converts echo contexts to parameters.
@@ -69,6 +92,31 @@ func (w *ServerInterfaceWrapper) SubmitVettingJob(ctx echo.Context) error {
 
 	// Invoke the callback with all the unmarshaled arguments
 	err = w.Handler.SubmitVettingJob(ctx)
+	return err
+}
+
+// SubmitBatchVettingJobs converts echo context to params.
+func (w *ServerInterfaceWrapper) SubmitBatchVettingJobs(ctx echo.Context) error {
+	var err error
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.SubmitBatchVettingJobs(ctx)
+	return err
+}
+
+// GetVettingJob converts echo context to params.
+func (w *ServerInterfaceWrapper) GetVettingJob(ctx echo.Context) error {
+	var err error
+	// ------------- Path parameter "job_id" -------------
+	var jobId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job_id", ctx.Param("job_id"), &jobId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter job_id: %s", err))
+	}
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.GetVettingJob(ctx, jobId)
 	return err
 }
 
@@ -120,6 +168,8 @@ func RegisterHandlersWithOptions(router EchoRouter, si ServerInterface, options 
 	}
 
 	router.POST(options.BaseURL+"/v1/vetting", wrapper.SubmitVettingJob, options.OperationMiddlewares["SubmitVettingJob"]...)
+	router.POST(options.BaseURL+"/v1/vetting/batch", wrapper.SubmitBatchVettingJobs, options.OperationMiddlewares["SubmitBatchVettingJobs"]...)
+	router.GET(options.BaseURL+"/v1/vetting/:job_id", wrapper.GetVettingJob, options.OperationMiddlewares["GetVettingJob"]...)
 
 }
 
@@ -128,15 +178,21 @@ func RegisterHandlersWithOptions(router EchoRouter, si ServerInterface, options 
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"rFQ9b9swEP0rwrWjGjlpJ23p5kxBC3QpCuFEnm06Eo8mjy6MwP+9ICXBX0oKFJ0s85F89z6kV1DcO7Zk",
-	"JUD9CkFtqMf8+Ki1p5AfnWdHXgzlf8rIIf3KwRHUEMQbu4ZjCYqjFT+POQ6CXaNY0yweBOUtxBNJc/8e",
-	"+DADHkvwtIvGk4b65+machAwUV6OdhLxq5wu5HZLShLbDxIxdv2NdpGC3DrTmq4zdt3gybqPnlZQw4fq",
-	"5HM1mlxNDh9LoB5Nl/av2PcoUI8r5a1k487vv4HTsX+boSdBjYLpCGptxLDF7vlMofhIM7a4Ddv57GIg",
-	"3+CarMzCv6ndML800V9qj97cKr/Kc/LnzI53IwuObaCZNm9IvTSpCzFMg9w22xMK6QblYk6NQp/E9DSX",
-	"05bbxug3yx7DfGevFKQlY1ecNxvpEjZqKh6fl1DCnnwwbKGG+7vF3SLdz44sOgM1fM5LJTiUTSas9vfV",
-	"fjifveChx8kRTIEvNdTwPba9kZHmiVsYrKcgX1nn91uxlTFVdK4zKh+utiENMn1G/ta9q9fpeBlxKlte",
-	"GJLL0z8sHv4/+9iMTK8pKG+cDIY+cVugUuSEdIFWF7tIkXSy+MtikQgu9y/tHjuji9GswuGhY9Q51xD7",
-	"HtPHcXS3wGLModhym9iPfwIAAP//",
+	"tFbfb9s2EP5XBK57ivwjXvcwPTXdgCFBgRXbsAFLPeEkni06Eo8hj24zw//7QEr+IVtx0a15isLj8T5+",
+	"331Hb0RJjSGNmp3INsKVFTYQP2+ktOjip7Fk0LLC+F+p+Cn85SeDIhOOrdJLsU1FSV6zHY4Zcgx1XpLE",
+	"wbhj4OciFpHz60vB2UBwmwqLj15ZlCK7PxyTthfYlexDO1xinu4OpGKFJYdqfyCz0stf8dGj43NmClXX",
+	"Si9zOFD3yuJCZOKbyYHnSUfyZMfwNhXYgKrDfvwEjalD2RVVWhK+6VbGJTUiFQuyDbDIuoxUGGBGq0Um",
+	"/r6H0T83o7+mox/G+bdXo/nVm6OV0fzqw4dxtzDfzNLtK5GeE6rMMfqzcCj6327YIIMEhpACUipWpKF+",
+	"f8QfW48DpJuK9HBneIc2hyVqHgx/xKIiesi9jczumfNWnd/8pFt27B7RcbEhnCHtcMArFZYPeeg073ZA",
+	"zn1jERhlDtzDKYFxxKrBIZ1WVORKPmsl74YdceEGvh7oaNRWlVXTUXxJt33jboSSqLkbEoacU0WNuYYm",
+	"VL6jSic/EYbaGvkj2YeY4vK10SJbQO1wEOiFC1ssqWlQSwjg+i66effulz+HCLTKPeSuJIu9hOvZfq/S",
+	"jEu0fUoPJ4d2r5FRDjbTCf6wpPSCIn7F8YCO+uTm/a1IxRqti+jF9Xg6noaqZFCDUSIT38WlaPYqwpis",
+	"ryfrNr9jOQoURIkk3EqRid980SjuytxRIdoeR8dvSUZ1StK809aYWpUxebJyLY2tjT9n8pOpuO17KXRH",
+	"XGgtEtHPprOvX72zYCwv0ZVWmbYdxB0VCZQlGkaZgJbJo0ePMlD8ejoNBfr7b/UaaiWTjqzEwFNNIKOu",
+	"zjcNhDeuYzeBpNMhWVERtxxpMymAy+pzCr0Nmw4yuf+hk2Js3JcKFsb6p9s28/vpdN+8YC08vYSeX4Zy",
+	"J+wQrr5wkciXlDrKmdDiWHN3JvqmnVXbUG6JA7L/jH1XGrDQIKN1Irs/hfh7hYnX6tFj0g7WhUIbMHCF",
+	"sefCZBFZnA0iFd2c7cblqXLpkQqnQ2t+pur0BVwanplnPNpO2Shb++6gTPY/G6KCr88VDImaOFmQ16e6",
+	"/Rhe38jT0dE2YnCBwVPvbrf/BgAA//8=",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

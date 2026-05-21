@@ -22,6 +22,50 @@ paths:
                 $ref: '#/components/schemas/VettingResponse'
         '400':
           description: Invalid request payload
+  /v1/vetting/{job_id}:
+    get:
+      summary: Check the status and results of a vetting job
+      operationId: GetVettingJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of the job
+      responses:
+        '200':
+          description: Job status and enriched metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VettingResult'
+        '404':
+          description: Job not found
+  /v1/vetting/batch:
+    post:
+      summary: Submit a batch of vetting jobs
+      operationId: SubmitBatchVettingJobs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              maxItems: 500  # Prevents massive memory spikes from payload bombs
+              items:
+                $ref: '#/components/schemas/VettingRequest'
+      responses:
+        '202':
+          description: Batch accepted and queued
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VettingResponse'
+        '400':
+          description: Invalid request payload
 
 components:
   schemas:
@@ -56,6 +100,8 @@ components:
         email:
           type: string
           format: email
+          pattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+          example: "johndoe@example.com"
         phone:
           type: string
         ip_address:
@@ -85,3 +131,26 @@ components:
           format: date-time
         check_status_url:
           type: string
+
+    VettingResult:
+      type: object
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+          example: "completed"
+        risk_score:
+          type: integer
+          example: 12
+        recommendation:
+          type: string
+          example: "ALLOW"
+        enrichment:
+          type: object
+          additionalProperties: true
+          example:
+            identity:
+              possible_name: "John Doe"
+            network:
+              is_vpn: false
