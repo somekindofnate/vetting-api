@@ -20,6 +20,7 @@ import (
 	// Alias the oapi-codegen middleware to 'middleware'
 	middleware "github.com/oapi-codegen/echo-middleware"
 	"github.com/somekindofnate/vetting-api/api"
+	"github.com/somekindofnate/vetting-api/internal/vetting"
 )
 
 type Server struct {
@@ -42,11 +43,12 @@ func (s *Server) SubmitVettingJob(ctx echo.Context) error {
 		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to serialize payload"})
 	}
 
-	// 2. Store the JSON in Redis using the jobID as the key.
-	// We also set a 24-hour expiration (TTL) so your database doesn't bloat over time.
-	err = pipe.Set(context.Background(), jobID, payloadBytes, 24*time.Hour).Err()
-	if err != nil {
-		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to write to Redis queue"})
+	// 2. Use a pipeline to save the data AND notify the queue atomically
+	pipe.Set(context.Background(), jobID, payloadBytes, 24*time.Hour)
+	pipe.LPush(context.Background(), "vetting_queue", jobID) // Notify the worker!
+
+	if _, err := pipe.Exec(context.Background()); err != nil {
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to queue job"})
 	}
 
 	// 3. Return the 202 Accepted response
@@ -61,49 +63,32 @@ func (s *Server) SubmitVettingJob(ctx echo.Context) error {
 }
 
 func (s *Server) GetVettingJob(ctx echo.Context, jobId string) error {
-	// 1. Fetch the payload from Redis using the shared client
+	// 1. Fetch the payload from Redis
 	payloadStr, err := s.rdb.Get(context.Background(), jobId).Result()
 
-	// 2. If the key doesn't exist (or expired), return a 404
 	if err == redis.Nil {
 		return ctx.JSON(http.StatusNotFound, map[string]string{"error": "Job not found"})
 	} else if err != nil {
-		// Catch actual database connection errors
 		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "Database error"})
 	}
 
-	// 3. (Optional) We can deserialize the original request just to prove we got it
-	var originalReq api.VettingRequest
-	if err := json.Unmarshal([]byte(payloadStr), &originalReq); err != nil {
+	// 2. Parse whatever is in Redis into a generic map
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(payloadStr), &data); err != nil {
 		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "Data corruption"})
 	}
 
-	// 4. Return our mocked Enrichment payload.
-	// Once the Python workers are built, they will overwrite the Redis key
-	// with the actual completed VettingResult JSON, which you would return here instead.
-	riskScore := 12
-	recommendation := "ALLOW"
-
-	enrichment := map[string]interface{}{
-		"identity": map[string]interface{}{
-			"email_submitted": originalReq.Email, // Pulling data from the Redis payload!
-			"possible_name":   "John Doe",
-		},
-		"network": map[string]interface{}{
-			"is_vpn":    false,
-			"asn_owner": "Comcast Cable",
-		},
+	// 3. Check if the background worker has finished processing it
+	if status, ok := data["status"].(string); ok && status == "completed" {
+		// The worker is done! Return the real result exactly as the worker saved it.
+		return ctx.JSON(http.StatusOK, data)
 	}
 
-	resp := api.VettingResult{
-		JobId:          &jobId,
-		Status:         func(str string) *string { return &str }("completed"),
-		RiskScore:      &riskScore,
-		Recommendation: &recommendation,
-		Enrichment:     &enrichment,
-	}
-
-	return ctx.JSON(http.StatusOK, resp)
+	// 4. If it's still in the queue (or currently being processed), return a pending status
+	return ctx.JSON(http.StatusOK, map[string]string{
+		"job_id": jobId,
+		"status": "queued",
+	})
 }
 
 func (s *Server) SubmitBatchVettingJobs(ctx echo.Context) error {
@@ -127,6 +112,7 @@ func (s *Server) SubmitBatchVettingJobs(ctx echo.Context) error {
 		}
 
 		pipe.Set(context.Background(), jobID, payloadBytes, 24*time.Hour)
+		pipe.LPush(context.Background(), "vetting_queue", jobID)
 
 		responses = append(responses, api.VettingResponse{
 			JobId:          &jobID,
@@ -242,6 +228,12 @@ func main() {
 		rdb: rdb,
 	}
 	api.RegisterHandlers(apiGroup, server)
+
+	// Initialize the worker engine
+	workerEngine := vetting.NewWorkerEngine(rdb)
+
+	// Run the queue listener in the background
+	go workerEngine.StartQueueListener(context.Background())
 
 	e.Logger.Fatal(e.Start(":8080"))
 }
