@@ -1,48 +1,93 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
-	echomiddleware "github.com/labstack/echo/v4/middleware"
 
+	// Alias the standard Echo middleware to 'echomiddleware'
+	echomiddleware "github.com/labstack/echo/v4/middleware"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/getkin/kin-openapi/openapi3"
+
+	// Alias the oapi-codegen middleware to 'middleware'
 	middleware "github.com/oapi-codegen/echo-middleware"
 	"github.com/somekindofnate/vetting-api/api"
 )
 
-type Server struct{}
+type Server struct {
+	rdb *redis.Client
+}
 
 func (s *Server) SubmitVettingJob(ctx echo.Context) error {
 	jobID := fmt.Sprintf("vett_%s", uuid.New().String()[:12])
+
+	pipe := s.rdb.Pipeline()
+
+	var req api.VettingRequest
+	if err := ctx.Bind(&req); err != nil {
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request payload"})
+	}
+
+	// 1. Marshal the complex struct into a clean JSON byte array
+	payloadBytes, err := json.Marshal(req)
+	if err != nil {
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to serialize payload"})
+	}
+
+	// 2. Store the JSON in Redis using the jobID as the key.
+	// We also set a 24-hour expiration (TTL) so your database doesn't bloat over time.
+	err = pipe.Set(context.Background(), jobID, payloadBytes, 24*time.Hour).Err()
+	if err != nil {
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to write to Redis queue"})
+	}
+
+	// 3. Return the 202 Accepted response
 	resp := api.VettingResponse{
 		JobId:          &jobID,
-		Status:         func(s string) *string { return &s }("queued"),
+		Status:         func(str string) *string { return &str }("queued"),
 		CreatedAt:      func(t time.Time) *time.Time { return &t }(time.Now().UTC()),
-		CheckStatusUrl: func(s string) *string { return &s }(fmt.Sprintf("https://api.sentinelapi.com/v1/vetting/%s", jobID)),
+		CheckStatusUrl: func(str string) *string { return &str }(fmt.Sprintf("https://api.sentinelapi.com/v1/vetting/%s", jobID)),
 	}
+
 	return ctx.JSON(http.StatusAccepted, resp)
 }
 
 func (s *Server) GetVettingJob(ctx echo.Context, jobId string) error {
-	// In production, you would query PostgreSQL or Redis here using the jobId.
-	// If it didn't exist, you would return:
-	// return ctx.JSON(http.StatusNotFound, map[string]string{"error": "Job not found"})
+	// 1. Fetch the payload from Redis using the shared client
+	payloadStr, err := s.rdb.Get(context.Background(), jobId).Result()
 
-	// For our boilerplate, we will mock a "completed" response
-	// containing the enriched data.
-	if jobId != "abc123" {
+	// 2. If the key doesn't exist (or expired), return a 404
+	if err == redis.Nil {
 		return ctx.JSON(http.StatusNotFound, map[string]string{"error": "Job not found"})
+	} else if err != nil {
+		// Catch actual database connection errors
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "Database error"})
 	}
+
+	// 3. (Optional) We can deserialize the original request just to prove we got it
+	var originalReq api.VettingRequest
+	if err := json.Unmarshal([]byte(payloadStr), &originalReq); err != nil {
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "Data corruption"})
+	}
+
+	// 4. Return our mocked Enrichment payload.
+	// Once the Python workers are built, they will overwrite the Redis key
+	// with the actual completed VettingResult JSON, which you would return here instead.
 	riskScore := 12
 	recommendation := "ALLOW"
 
-	// Create a mock enrichment map
 	enrichment := map[string]interface{}{
 		"identity": map[string]interface{}{
-			"possible_name": "John Doe",
+			"email_submitted": originalReq.Email, // Pulling data from the Redis payload!
+			"possible_name":   "John Doe",
 		},
 		"network": map[string]interface{}{
 			"is_vpn":    false,
@@ -62,34 +107,40 @@ func (s *Server) GetVettingJob(ctx echo.Context, jobId string) error {
 }
 
 func (s *Server) SubmitBatchVettingJobs(ctx echo.Context) error {
-	// The middleware has already validated that this is an array
-	// of VettingRequests and that it contains 500 or fewer items.
 	var reqs []api.VettingRequest
 	if err := ctx.Bind(&reqs); err != nil {
 		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid batch payload"})
 	}
 
-	// Pre-allocate the slice capacity for performance based on the batch size
 	responses := make([]api.VettingResponse, 0, len(reqs))
-
-	// Use a single timestamp for the entire batch
 	now := time.Now().UTC()
 
-	// Loop through the incoming array
-	for _, _ = range reqs { // (We ignore the req data for now until Redis is hooked up)
+	// Use the globally shared Redis client via 's.rdb'
+	pipe := s.rdb.Pipeline()
+
+	for _, req := range reqs {
 		jobID := fmt.Sprintf("vett_%s", uuid.New().String()[:12])
 
-		// In production, push the individual 'req' to your Redis queue here
+		payloadBytes, err := json.Marshal(req)
+		if err != nil {
+			continue
+		}
+
+		pipe.Set(context.Background(), jobID, payloadBytes, 24*time.Hour)
 
 		responses = append(responses, api.VettingResponse{
 			JobId:          &jobID,
-			Status:         func(s string) *string { return &s }("queued"),
+			Status:         func(str string) *string { return &str }("queued"),
 			CreatedAt:      &now,
-			CheckStatusUrl: func(s string) *string { return &s }(fmt.Sprintf("https://api.sentinelapi.com/v1/vetting/%s", jobID)),
+			CheckStatusUrl: func(str string) *string { return &str }(fmt.Sprintf("https://api.yourdomain.com/v1/vetting/%s", jobID)),
 		})
 	}
 
-	// Return the array of responses
+	_, err := pipe.Exec(context.Background())
+	if err != nil {
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to write batch to Redis queue"})
+	}
+
 	return ctx.JSON(http.StatusAccepted, responses)
 }
 
@@ -98,6 +149,8 @@ func main() {
 
 	e.Use(echomiddleware.Logger())
 	e.Use(echomiddleware.Recover())
+
+	openapi3.DefineStringFormat("email", openapi3.FormatOfStringForEmail)
 
 	swagger, err := api.GetSwagger()
 	if err != nil {
@@ -136,14 +189,58 @@ func main() {
 		return c.HTML(http.StatusOK, html)
 	})
 
-	// 2. Create a specific isolated sub-group for our actual API routes
+	// Create a specific isolated sub-group for our actual API routes
 	apiGroup := e.Group("")
 
-	// 3. Apply the OpenAPI validator middleware ONLY to this group
-	apiGroup.Use(middleware.OapiRequestValidator(swagger))
+	// Define the Validator Options with a custom ErrorHandler
+	validatorOpts := &middleware.Options{
+		// Intercept the validation errors here
+		ErrorHandler: func(c echo.Context, err *echo.HTTPError) error {
+			errMsg := err.Message.(string)
 
-	// 4. Register your generated handlers to the group instead of 'e'
-	server := &Server{}
+			// Specifically catch the ugly email regex error
+			if strings.Contains(errMsg, "email") && strings.Contains(errMsg, "regular expression") {
+				return c.JSON(http.StatusBadRequest, map[string]string{
+					"error": "Invalid email address format",
+				})
+			}
+
+			// Clean up generic schema errors
+			cleanMsg := strings.Replace(errMsg, "request body has an error: doesn't match schema #/components/schemas/VettingRequest: ", "", 1)
+
+			// For batch errors, it uses a different prefix
+			cleanMsg = strings.Replace(cleanMsg, "request body has an error: doesn't match schema : ", "", 1)
+
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"error":   "Payload validation failed",
+				"details": cleanMsg,
+			})
+		},
+	}
+
+	// Apply the OpenAPI validator middleware with the custom options
+	apiGroup.Use(middleware.OapiRequestValidatorWithOptions(swagger, validatorOpts))
+
+	// Initialize the global Redis client once
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "", // no password
+		DB:       0,  // use default DB
+		Protocol: 2,
+	})
+
+	// Optional but recommended: Ping Redis to ensure it's actually running before starting the web server
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		e.Logger.Fatalf("Failed to connect to Redis: %v", err)
+	}
+
+	// Defer closing it so it stays open for the life of the app
+	defer rdb.Close()
+
+	// Pass the global Redis client into your Server struct
+	server := &Server{
+		rdb: rdb,
+	}
 	api.RegisterHandlers(apiGroup, server)
 
 	e.Logger.Fatal(e.Start(":8080"))

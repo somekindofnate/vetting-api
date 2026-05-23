@@ -48,8 +48,23 @@ github.com/somekindofnate/vetting-api/
 ### Prerequisites
 * [Go 1.21+](https://go.dev/doc/install)
 * `oapi-codegen` CLI installed globally
+* **Redis** (Required for async task queuing)
 
-### 1. Install Dependencies
+### 1. Install Redis
+The API relies on a local Redis server to queue incoming validation jobs. You can find the full setup instructions in the [Official Redis Installation Guide](https://redis.io/docs/latest/operate/oss_and_stack/install/install-stack/).
+
+**Quick Start with Docker (Recommended):**
+```bash
+docker run -d --name redis -p 6379:6379 redis
+```
+
+**MacOS (via Homebrew):**
+```bash
+brew install redis
+brew services start redis
+```
+
+### 2. Install Project Dependencies
 ```bash
 # Clone the repository
 git clone https://github.com/somekindofnate/vetting-api.git
@@ -59,13 +74,14 @@ cd vetting-api
 go mod tidy
 ```
 
-### 2. Generate OpenAPI Code (If YAML is updated)
+### 3. Generate OpenAPI Code (If YAML is updated)
 If you make changes to `api/openapi.yaml`, regenerate the Go boilerplate:
 ```bash
 oapi-codegen -generate types,server,spec -package api api/openapi.yaml > api/api.gen.go
 ```
 
-### 3. Run the Server
+### 4. Run the Server
+Ensure your Redis instance is running, then start the Go API:
 ```bash
 go run cmd/server/main.go
 ```
@@ -134,11 +150,12 @@ curl -X POST http://localhost:8080/v1/vetting/batch \
 ### 3. Retrieve a Completed Job (Polling)
 If you aren't using webhooks, you can manually check the status of a job. 
 
-*Note: The current boilerplate is hardcoded to return a `404 Not Found` unless you request the exact mock ID `abc123`.*
+*Note: The current boilerplate is hardcoded to return a mock response. It looks up the provided ID in Redis and generates a static enrichment payload if found.*
 
 **Request:**
 ```bash
-curl -X GET http://localhost:8080/v1/vetting/abc123
+# Replace 'vett_abc123' with the actual ID returned from your POST request
+curl -X GET http://localhost:8080/v1/vetting/vett_abc123
 ```
 
 **Response:**
@@ -146,16 +163,20 @@ curl -X GET http://localhost:8080/v1/vetting/abc123
 {
   "enrichment": {
     "identity": {
+      "email_submitted": "johndoe@gmail.com",
       "possible_name": "John Doe"
     },
     "network": {
       "asn_owner": "Comcast Cable",
-      "is_vpn": false
+      "ip_vpn": false
     }
   },
-  "job_id": "abc123",
+  "job_id": "vett_abc123",
   "recommendation": "ALLOW",
   "risk_score": 12,
   "status": "completed"
 }
 ```
+
+---
+*Developed by the Core Engineering Team.*
