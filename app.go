@@ -8,6 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/somekindofnate/vetting-api/internal/models"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
+
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
@@ -25,6 +29,7 @@ import (
 
 type Server struct {
 	rdb *redis.Client
+	db  *gorm.DB
 }
 
 func (s *Server) SubmitVettingJob(ctx echo.Context) error {
@@ -136,6 +141,20 @@ func main() {
 	e.Use(echomiddleware.Logger())
 	e.Use(echomiddleware.Recover())
 
+	// 1. Connect to MySQL
+	// Update with your actual MySQL credentials
+	dsn := "user:password@tcp(127.0.0.1:3306)/vetting_db?charset=utf8mb4&parseTime=True&loc=Local"
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	if err != nil {
+		e.Logger.Fatalf("Failed to connect to MySQL: %v", err)
+	}
+
+	// 2. Auto-migrate the schema
+	// This creates the tables if they don't exist
+	if err := db.AutoMigrate(&models.Organization{}, &models.User{}, &models.APIKey{}); err != nil {
+		e.Logger.Fatalf("Failed to migrate database: %v", err)
+	}
+
 	openapi3.DefineStringFormat("email", openapi3.FormatOfStringForEmail)
 
 	swagger, err := api.GetSwagger()
@@ -207,7 +226,7 @@ func main() {
 	// Apply the OpenAPI validator middleware with the custom options
 	apiGroup.Use(middleware.OapiRequestValidatorWithOptions(swagger, validatorOpts))
 
-	// Initialize the global Redis client once
+	// 1. Initialize the global Redis client once
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
 		Password: "", // no password
@@ -223,17 +242,22 @@ func main() {
 	// Defer closing it so it stays open for the life of the app
 	defer rdb.Close()
 
-	// Pass the global Redis client into your Server struct
+	// 2. NOW WE CREATE THE SERVER!
+	// Both db and rdb exist at this point.
 	server := &Server{
 		rdb: rdb,
+		db:  db,
 	}
+
+	// 3. Register your generated handlers to the group
 	api.RegisterHandlers(apiGroup, server)
 
-	// Initialize the worker engine
+	// 4. Initialize the worker engine
 	workerEngine := vetting.NewWorkerEngine(rdb)
 
 	// Run the queue listener in the background
 	go workerEngine.StartQueueListener(context.Background())
 
+	// 5. Boot the API
 	e.Logger.Fatal(e.Start(":8080"))
 }
